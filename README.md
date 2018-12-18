@@ -9,3 +9,5 @@ Team members:
 * Vsevolod Glazov
 * Evgeny Kovalev
 * Leonid Matyushin
+
+Original paper: https://openreview.net/pdf?id=rkxd2oR9Y7
