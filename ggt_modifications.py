@@ -27,6 +27,7 @@ from tensorflow.python.ops import linalg_ops
 from tensorflow.python.ops import math_ops
 from tensorflow.python.ops import state_ops
 from tensorflow.python.ops import random_ops
+from tensorflow.python.ops import gen_math_ops
 import tensorflow as tf
 
 
@@ -46,7 +47,9 @@ class GGTOptimizer(optimizer_v2.OptimizerV2):
                eps=1e-4,
                svd_eps=1e-6,
                sigma_eps=1e-2,
-               std=0.0001):
+               std=1e-8,
+               beta2=1,
+               use_expectations=False):
     """Construct a new GGT optimizer.
     Initialization:
     ```
@@ -99,12 +102,14 @@ class GGTOptimizer(optimizer_v2.OptimizerV2):
     super(GGTOptimizer, self).__init__(use_locking, name)
     self._set_hyper("lr", learning_rate)
     self._set_hyper("beta1", beta1)
+    self._set_hyper("beta2", beta2)
     self._set_hyper("window", window)
     self._set_hyper("eps", eps)
     self._set_hyper("svd_eps", svd_eps)
     self._set_hyper("sigma_eps", sigma_eps)
     self._set_hyper("std", std)
 
+    self.use_expectations = use_expectations
     self.index_dict = {}
     self.shape_dict = {}
 
@@ -206,12 +211,13 @@ class GGTOptimizer(optimizer_v2.OptimizerV2):
 
     # Update the first moment estimate.
     beta1 = state.get_hyper("beta1", dtype=var_dtype)
+    beta2 = state.get_hyper("beta2", dtype=var_dtype)
     moment1 = self._get_moment1(state)
     flat_grad = self._get_flat_grad(state)
     # moment1_t := beta1 * moment1_{t-1} + (1 - beta1) * flat_grad_t
     std = state.get_hyper("std", dtype=var_dtype)
     random = random_ops.random_normal(moment1.shape, stddev=std)
-    update_moment1 = moment1.assign(beta1 * moment1 + (1. - beta1) * flat_grad + random)
+    update_moment1 = moment1.assign(beta2 * (beta1 * moment1 + (1. - beta1) * flat_grad + random))
 
     # Update the gradient buffer.
     window = state.get_hyper("window")
@@ -221,6 +227,7 @@ class GGTOptimizer(optimizer_v2.OptimizerV2):
     # grad_buffer[(t-1) % window] := moment1_t
     update_grad_buffer = state_ops.scatter_update(grad_buffer, next_grad_index,
                                                   update_moment1)
+    
 
     # Compute the update step.
     eps = state.get_hyper("eps", dtype=var_dtype)
@@ -236,8 +243,15 @@ class GGTOptimizer(optimizer_v2.OptimizerV2):
     # m = grad_buffer^T / sqrt(min(t, window))
     # m has shape [model dimension, window], where model dimension is the sum
     # of the dimensions of the flattened variables.
-    m = array_ops.transpose(math_ops.divide(update_grad_buffer, denom))
-
+    if self.use_expectations:
+      cumsum = math_ops.cumsum(update_grad_buffer, axis=0)
+      cumsum = array_ops.transpose(cumsum)
+      cumsum = math_ops.divide(cumsum, tf.to_float(gen_math_ops._range(1, window+1, 1)))
+      cumsum = array_ops.transpose(cumsum)
+      m = array_ops.transpose(math_ops.divide(cumsum, denom))
+    else:
+      m = array_ops.transpose(math_ops.divide(update_grad_buffer, denom))
+    
     # sigma, u, _ = SVD(m^Tm + I * svd_eps)
     mm = math_ops.matmul(m, m, transpose_a=True)
     damping = math_ops.cast(linalg_ops.eye(window), dtype=var_dtype) * svd_eps
